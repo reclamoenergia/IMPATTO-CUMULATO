@@ -1,0 +1,1 @@
+QGIS wind visibility plugin
