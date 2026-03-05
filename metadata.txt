@@ -1,0 +1,14 @@
+[general]
+name=IMPATTO-CUMULATO
+qgisMinimumVersion=3.22
+description=Plugin QGIS per il calcolo dell'indice di impatto cumulato.
+version=0.2.0
+author=IMPATTO-CUMULATO Team
+email=info@example.com
+about=Interfaccia QGIS con tabella componenti per calcolare indice cumulato con media pesata e validazione input.
+tracker=
+repository=
+category=Analysis
+icon=
+experimental=True
+deprecated=False
