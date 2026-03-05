@@ -1,0 +1,17 @@
+# Keep text files normalized to LF
+* text=auto eol=lf
+
+# Mark common binary extensions as binary to avoid text diff issues
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.7z binary
+*.gz binary
+*.so binary
+*.dll binary
+*.dylib binary
+*.exe binary

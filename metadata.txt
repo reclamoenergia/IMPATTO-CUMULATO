@@ -1,0 +1,17 @@
+[general]
+name=IMPATTO-CUMULATO
+qgisMinimumVersion=3.22
+description=Plugin QGIS per analisi di impatto cumulato e visibilità eolica.
+version=0.1.0
+author=IMPATTO-CUMULATO Team
+email=dev@example.com
+about=Plugin iniziale con struttura pronta per sviluppo e distribuzione.
+tracker=
+repository=
+category=Analysis
+icon=
+experimental=False
+deprecated=False
+
+[help]
+homepage=
