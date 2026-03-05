@@ -1,0 +1,14 @@
+[general]
+name=IMPATTO-CUMULATO
+qgisMinimumVersion=3.22
+description=Plugin QGIS per il calcolo dell'indice di impatto cumulato.
+version=0.1.0
+author=IMPATTO-CUMULATO Team
+email=info@example.com
+about=Include il modulo calculator.py con il codice di calcolo dell'indice cumulato.
+tracker=
+repository=
+category=Analysis
+icon=
+experimental=True
+deprecated=False
