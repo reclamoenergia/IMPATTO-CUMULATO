@@ -1,0 +1,32 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build/distribution artifacts
+build/
+dist/
+*.egg-info/
+*.whl
+*.zip
+*.tar.gz
+
+# QGIS/Qt generated files
+*.qgz~
+*.qml~
+*.tmp
+
+# Compiled libraries/binaries (avoid accidental commit on GitHub)
+*.dll
+*.dylib
+*.exe
+*.obj
+*.o
+*.pyd
+*.so
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
