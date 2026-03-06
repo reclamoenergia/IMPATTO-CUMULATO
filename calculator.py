@@ -85,10 +85,13 @@ def union_circular_intervals(intervals: Iterable[tuple[float, float]]) -> float:
     """Union length for angular intervals on [0, 360)."""
     normalized: list[tuple[float, float]] = []
     for start, end in intervals:
-        s = start % 360.0
-        e = end % 360.0
-        if math.isclose((end - start) % 360.0, 0.0, abs_tol=1e-10) and not math.isclose(start, end):
+        width = (end - start) % 360.0
+        if math.isclose(width, 0.0, abs_tol=1e-10) and not math.isclose(start, end):
             return 360.0
+        s = start % 360.0
+        e = (s + width) % 360.0
+        if width <= 0.0:
+            continue
         if s <= e:
             normalized.append((s, e))
         else:
@@ -116,7 +119,7 @@ def los_horizon_angle(dem: DemGrid, px: float, py: float, tx: float, ty: float, 
     if di <= 0.0:
         return -math.inf
 
-    step = max(0.5, dem.sample_step)
+    step = max(0.1, dem.sample_step)
     n_steps = int(di / step)
     if n_steps <= 1:
         return -math.inf
@@ -138,12 +141,18 @@ def los_horizon_angle(dem: DemGrid, px: float, py: float, tx: float, ty: float, 
     return alpha_hor
 
 
-def compute_cell_metrics(px: float, py: float, hp: float, candidate_turbines: Sequence[Turbine], dem: DemGrid, radius_m: float) -> dict[str, float | int | None]:
-    """Compute cumulative metrics for a single observer location."""
+def compute_point_metrics(
+    px: float,
+    py: float,
+    hp: float,
+    candidate_turbines: Sequence[Turbine],
+    dem: DemGrid,
+    radius_m: float,
+) -> dict[str, float]:
+    """Compute Aapp_sum, Hocc and VAI for one observer location."""
     intervals: list[tuple[float, float]] = []
-    aapp_sum_rad = 0.0
-    n_vis = 0
-    d_min = math.inf
+    aapp_sum_deg = 0.0
+    vai = 0.0
 
     for turbine in candidate_turbines:
         dx = turbine.x - px
@@ -164,24 +173,24 @@ def compute_cell_metrics(px: float, py: float, hp: float, candidate_turbines: Se
             continue
 
         hvisbase = max(hbot, hcut)
-        aapp_vis = max(0.0, math.atan((htop - hp) / di) - math.atan((hvisbase - hp) / di))
+        aapp_vis_rad = max(0.0, math.atan((htop - hp) / di) - math.atan((hvisbase - hp) / di))
+        if aapp_vis_rad <= 0.0:
+            continue
 
-        if aapp_vis > 0.0:
-            aapp_sum_rad += aapp_vis
-            n_vis += 1
-            d_min = min(d_min, di)
-            delta_theta = math.degrees(2.0 * math.atan((turbine.rot_d / 2.0) / di))
-            intervals.append((theta - delta_theta / 2.0, theta + delta_theta / 2.0))
+        aapp_vis_deg = math.degrees(aapp_vis_rad)
+        delta_theta_deg = math.degrees(2.0 * math.atan((turbine.rot_d / 2.0) / di))
 
-    aapp_sum_deg = math.degrees(aapp_sum_rad)
-    hocc = union_circular_intervals(intervals)
-    dsky = aapp_sum_deg / hocc if hocc > 0.0 else 0.0
+        aapp_sum_deg += aapp_vis_deg
+        vai += aapp_vis_deg * delta_theta_deg
+        intervals.append((theta - delta_theta_deg / 2.0, theta + delta_theta_deg / 2.0))
 
     return {
         "aapp_sum": float(aapp_sum_deg),
-        "hocc": float(hocc),
-        "dsky": float(dsky),
-        "astor": int(n_vis),
-        "n_vis": int(n_vis),
-        "d_min": None if n_vis == 0 else float(d_min),
+        "hocc": float(union_circular_intervals(intervals)),
+        "vai": float(vai),
     }
+
+
+def compute_cell_metrics(*args, **kwargs) -> dict[str, float]:
+    """Backward-compatible alias."""
+    return compute_point_metrics(*args, **kwargs)
