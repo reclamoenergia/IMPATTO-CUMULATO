@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 
 import numpy as np
@@ -19,6 +20,7 @@ from qgis.core import (
     QgsProcessing,
     QgsProcessingAlgorithm,
     QgsProcessingException,
+    QgsProcessingParameterEnum,
     QgsProcessingParameterFeatureSink,
     QgsProcessingParameterFeatureSource,
     QgsProcessingParameterField,
@@ -33,7 +35,7 @@ from qgis.core import (
     Qgis,
 )
 
-from .calculator import DemGrid, Turbine, compute_cell_metrics
+from .calculator import DemGrid, Turbine, compute_point_metrics
 
 
 class CumulativeVisibilityAlgorithm(QgsProcessingAlgorithm):
@@ -42,6 +44,9 @@ class CumulativeVisibilityAlgorithm(QgsProcessingAlgorithm):
     ROT_FIELD = "ROT_FIELD"
     INPUT_DEM = "INPUT_DEM"
     RADIUS = "RADIUS"
+    EXTENT_MODE = "EXTENT_MODE"
+    PIXEL_MODE = "PIXEL_MODE"
+    PIXEL_SIZE = "PIXEL_SIZE"
     OUTPUT_DIR = "OUTPUT_DIR"
     PREFIX = "PREFIX"
     INPUT_RECEPTORS = "INPUT_RECEPTORS"
@@ -67,7 +72,7 @@ class CumulativeVisibilityAlgorithm(QgsProcessingAlgorithm):
 
     def shortHelpString(self):
         return self.tr(
-            "Compute Aapp_sum_vis, Hocc, Dsky and ASTOR rasters from turbines and DEM using line-of-sight horizon logic."
+            "Compute Aapp_sum, Hocc and VAI rasters from turbines and DEM using line-of-sight local horizon logic."
         )
 
     def initAlgorithm(self, config=None):
@@ -76,6 +81,9 @@ class CumulativeVisibilityAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(QgsProcessingParameterField(self.ROT_FIELD, self.tr("Rotor diameter field"), parentLayerParameterName=self.INPUT_TURBINES, type=QgsProcessingParameterField.Numeric))
         self.addParameter(QgsProcessingParameterRasterLayer(self.INPUT_DEM, self.tr("DEM raster")))
         self.addParameter(QgsProcessingParameterNumber(self.RADIUS, self.tr("Analysis radius (m)"), QgsProcessingParameterNumber.Double, defaultValue=5000.0, minValue=0.1))
+        self.addParameter(QgsProcessingParameterEnum(self.EXTENT_MODE, self.tr("Output extent"), [self.tr("DEM extent"), self.tr("Turbine extent buffered by radius")], defaultValue=0))
+        self.addParameter(QgsProcessingParameterEnum(self.PIXEL_MODE, self.tr("Output pixel size"), [self.tr("DEM pixel size"), self.tr("User-defined")], defaultValue=0))
+        self.addParameter(QgsProcessingParameterNumber(self.PIXEL_SIZE, self.tr("User pixel size"), QgsProcessingParameterNumber.Double, defaultValue=0.0, minValue=0.0, optional=True))
         self.addParameter(QgsProcessingParameterFolderDestination(self.OUTPUT_DIR, self.tr("Output folder")))
         self.addParameter(QgsProcessingParameterString(self.PREFIX, self.tr("Output file prefix"), defaultValue="impact"))
         self.addParameter(QgsProcessingParameterFeatureSource(self.INPUT_RECEPTORS, self.tr("Optional receptor points"), [QgsProcessing.TypeVectorPoint], optional=True))
@@ -87,6 +95,9 @@ class CumulativeVisibilityAlgorithm(QgsProcessingAlgorithm):
         hub_field = self.parameterAsString(parameters, self.HUB_FIELD, context)
         rot_field = self.parameterAsString(parameters, self.ROT_FIELD, context)
         radius_m = self.parameterAsDouble(parameters, self.RADIUS, context)
+        extent_mode = self.parameterAsEnum(parameters, self.EXTENT_MODE, context)
+        pixel_mode = self.parameterAsEnum(parameters, self.PIXEL_MODE, context)
+        user_pixel_size = self.parameterAsDouble(parameters, self.PIXEL_SIZE, context)
         output_dir = self.parameterAsString(parameters, self.OUTPUT_DIR, context)
         prefix = self.parameterAsString(parameters, self.PREFIX, context)
         receptor_source = self.parameterAsSource(parameters, self.INPUT_RECEPTORS, context)
@@ -109,13 +120,12 @@ class CumulativeVisibilityAlgorithm(QgsProcessingAlgorithm):
 
         band = dataset.GetRasterBand(1)
         dem_data = band.ReadAsArray().astype(np.float32)
-        geotransform = dataset.GetGeoTransform()
+        dem_gt = dataset.GetGeoTransform()
         projection = dataset.GetProjection()
         nodata = band.GetNoDataValue()
-        dem = DemGrid(dem_data, geotransform, nodata)
+        dem = DemGrid(dem_data, dem_gt, nodata)
 
         turbines: list[Turbine] = []
-        transformed_features: dict[int, QgsFeature] = {}
         index = QgsSpatialIndex()
 
         for feature in turbine_source.getFeatures():
@@ -131,51 +141,72 @@ class CumulativeVisibilityAlgorithm(QgsProcessingAlgorithm):
             hbase = dem.value_at(qpt.x(), qpt.y())
             if hbase is None:
                 continue
-            hub_h = float(feature[hub_field])
-            rot_d = float(feature[rot_field])
-            turbine = Turbine(qpt.x(), qpt.y(), hub_h, rot_d, hbase)
+            turbine = Turbine(qpt.x(), qpt.y(), float(feature[hub_field]), float(feature[rot_field]), hbase)
             turbines.append(turbine)
 
-            idx = len(turbines) - 1
             tf = QgsFeature()
-            tf.setId(idx)
+            tf.setId(len(turbines) - 1)
             tf.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(turbine.x, turbine.y)))
-            transformed_features[idx] = tf
             index.addFeature(tf)
 
         if not turbines:
             raise QgsProcessingException(self.tr("No valid turbines available after DEM sampling."))
 
-        rows, cols = dem_data.shape
+        px_size = dem.pixel_size_x
+        py_size = dem.pixel_size_y
+        if pixel_mode == 1:
+            if user_pixel_size <= 0:
+                raise QgsProcessingException(self.tr("User pixel size must be > 0."))
+            px_size = user_pixel_size
+            py_size = user_pixel_size
+
+        if extent_mode == 0:
+            xmin = dem_gt[0]
+            ymax = dem_gt[3]
+            xmax = xmin + dem.ncols * dem_gt[1]
+            ymin = ymax + dem.nrows * dem_gt[5]
+            xmin, xmax = min(xmin, xmax), max(xmin, xmax)
+            ymin, ymax = min(ymin, ymax), max(ymin, ymax)
+        else:
+            xs = [t.x for t in turbines]
+            ys = [t.y for t in turbines]
+            xmin = min(xs) - radius_m
+            xmax = max(xs) + radius_m
+            ymin = min(ys) - radius_m
+            ymax = max(ys) + radius_m
+
+        cols = int(math.ceil((xmax - xmin) / px_size))
+        rows = int(math.ceil((ymax - ymin) / py_size))
+        out_gt = (xmin, px_size, 0.0, ymax, 0.0, -py_size)
+
+        fill_value = nodata if nodata is not None else np.nan
         outputs = {
-            "AappSumVis": np.full((rows, cols), nodata if nodata is not None else np.nan, dtype=np.float32),
-            "Hocc": np.full((rows, cols), nodata if nodata is not None else np.nan, dtype=np.float32),
-            "Dsky": np.full((rows, cols), nodata if nodata is not None else np.nan, dtype=np.float32),
-            "ASTOR": np.full((rows, cols), nodata if nodata is not None else np.nan, dtype=np.float32),
+            "AappSum": np.full((rows, cols), fill_value, dtype=np.float32),
+            "Hocc": np.full((rows, cols), fill_value, dtype=np.float32),
+            "VAI": np.full((rows, cols), fill_value, dtype=np.float32),
         }
 
         for row in range(rows):
             if feedback.isCanceled():
                 break
+            py = out_gt[3] + (row + 0.5) * out_gt[5]
             for col in range(cols):
-                hp = float(dem_data[row, col])
-                if nodata is not None and np.isclose(hp, nodata):
+                px = out_gt[0] + (col + 0.5) * out_gt[1]
+                hp = dem.value_at(px, py)
+                if hp is None:
                     continue
-                px, py = dem.pixel_center(row, col)
                 search = QgsRectangle(px - radius_m, py - radius_m, px + radius_m, py + radius_m)
                 candidate_ids = index.intersects(search)
                 if not candidate_ids:
-                    outputs["AappSumVis"][row, col] = 0.0
+                    outputs["AappSum"][row, col] = 0.0
                     outputs["Hocc"][row, col] = 0.0
-                    outputs["Dsky"][row, col] = 0.0
-                    outputs["ASTOR"][row, col] = 0.0
+                    outputs["VAI"][row, col] = 0.0
                     continue
                 candidates = [turbines[idx] for idx in candidate_ids]
-                metrics = compute_cell_metrics(px, py, hp, candidates, dem, radius_m)
-                outputs["AappSumVis"][row, col] = metrics["aapp_sum"]
+                metrics = compute_point_metrics(px, py, hp, candidates, dem, radius_m)
+                outputs["AappSum"][row, col] = metrics["aapp_sum"]
                 outputs["Hocc"][row, col] = metrics["hocc"]
-                outputs["Dsky"][row, col] = metrics["dsky"]
-                outputs["ASTOR"][row, col] = metrics["astor"]
+                outputs["VAI"][row, col] = metrics["vai"]
 
             feedback.setProgress(int((row + 1) * 100 / rows))
 
@@ -183,27 +214,23 @@ class CumulativeVisibilityAlgorithm(QgsProcessingAlgorithm):
         output_paths = {}
         for key, arr in outputs.items():
             path = os.path.join(output_dir, f"{prefix}_{key}.tif")
-            self._write_geotiff(path, arr, geotransform, projection, nodata)
+            self._write_geotiff(path, arr, out_gt, projection, nodata)
             output_paths[key] = path
             rlayer = QgsRasterLayer(path, os.path.basename(path))
             if rlayer.isValid():
                 QgsProject.instance().addMapLayer(rlayer)
 
         results = {
-            "AappSumVis": output_paths["AappSumVis"],
+            "AappSum": output_paths["AappSum"],
             "Hocc": output_paths["Hocc"],
-            "Dsky": output_paths["Dsky"],
-            "ASTOR": output_paths["ASTOR"],
+            "VAI": output_paths["VAI"],
         }
 
         if receptor_source is not None:
-            receptor_fields = QgsFields()
-            receptor_fields.append(QgsField("n_vis", QVariant.Int))
-            receptor_fields.append(QgsField("d_min", QVariant.Double))
+            receptor_fields = QgsFields(receptor_source.fields())
             receptor_fields.append(QgsField("aapp_sum", QVariant.Double))
             receptor_fields.append(QgsField("hocc", QVariant.Double))
-            receptor_fields.append(QgsField("dsky", QVariant.Double))
-            receptor_fields.append(QgsField("astor", QVariant.Int))
+            receptor_fields.append(QgsField("vai", QVariant.Double))
 
             sink, sink_id = self.parameterAsSink(
                 parameters,
@@ -231,18 +258,15 @@ class CumulativeVisibilityAlgorithm(QgsProcessingAlgorithm):
                     hp = dem.value_at(dem_pt.x(), dem_pt.y())
                     if hp is None:
                         continue
+
                     search = QgsRectangle(dem_pt.x() - radius_m, dem_pt.y() - radius_m, dem_pt.x() + radius_m, dem_pt.y() + radius_m)
                     candidates = [turbines[idx] for idx in index.intersects(search)]
-                    metrics = compute_cell_metrics(dem_pt.x(), dem_pt.y(), hp, candidates, dem, radius_m)
+                    metrics = compute_point_metrics(dem_pt.x(), dem_pt.y(), hp, candidates, dem, radius_m)
 
                     out_feature = QgsFeature(receptor_fields)
                     out_feature.setGeometry(geom)
-                    out_feature["n_vis"] = metrics["n_vis"]
-                    out_feature["d_min"] = metrics["d_min"]
-                    out_feature["aapp_sum"] = metrics["aapp_sum"]
-                    out_feature["hocc"] = metrics["hocc"]
-                    out_feature["dsky"] = metrics["dsky"]
-                    out_feature["astor"] = metrics["astor"]
+                    attrs = list(feature.attributes()) + [metrics["aapp_sum"], metrics["hocc"], metrics["vai"]]
+                    out_feature.setAttributes(attrs)
                     sink.addFeature(out_feature, QgsFeatureSink.FastInsert)
 
                 results[self.OUTPUT_RECEPTORS] = sink_id
