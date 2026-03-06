@@ -1,64 +1,55 @@
 # IMPATTO-CUMULATO (plugin QGIS)
 
-Hai ragione: adesso nel repository c'è anche il **codice del plugin**.
+Plugin QGIS per l'analisi cumulata di visibilità eolica su DEM.
 
-## Dove sta il codice
+## Cosa calcola
 
-- `calculator.py` → funzioni di calcolo dell'indice cumulato
-- `plugin.py` → integrazione QGIS (menu + azione demo)
-- `__init__.py` → entry-point richiesto da QGIS
-- `metadata.txt` → metadati del plugin
+Dato:
+- layer punti turbine eoliche
+- raster DEM
+- raggio di analisi (metri)
+- layer opzionale di recettori
 
-## Installazione (git clone diretto nella cartella plugin)
+il plugin calcola con logica LOS reale:
+- `Aapp_sum_vis` (somma angoli verticali apparenti visibili)
+- `Hocc` (occupazione orizzonte in gradi, unione intervalli azimutali)
+- `Dsky` (`Aapp_sum_vis / Hocc`)
+- `ASTOR` (numero turbine visibili)
 
-> Usa il nome cartella `IMPATTO_CUMULATO` (con underscore), così QGIS lo carica correttamente.
+Le turbine sono visibili solo per la porzione sopra l'orizzonte locale derivato dal DEM campionato lungo la linea di vista.
 
-### Linux
+## Come avviare in QGIS
 
-```bash
-git clone https://github.com/<TUO-UTENTE>/<TUO-REPO>.git ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/IMPATTO_CUMULATO
-```
+1. Abilita il plugin `IMPATTO-CUMULATO`.
+2. Apri menu `IMPATTO-CUMULATO` → `IMPATTO-CUMULATO: cumulative visibility`.
+3. Nella finestra Processing imposta:
+   - `Turbine points`
+   - `Hub height field`
+   - `Rotor diameter field`
+   - `DEM raster`
+   - `Analysis radius (m)`
+   - `Output folder`
+   - `Output file prefix`
+   - opzionale `Optional receptor points` e `Receptor metrics output`
 
-### Windows (PowerShell)
+## Output raster
 
-```powershell
-git clone https://github.com/<TUO-UTENTE>/<TUO-REPO>.git "$env:APPDATA\QGIS\QGIS3\profiles\default\python\plugins\IMPATTO_CUMULATO"
-```
+I raster sono scritti in GeoTIFF georeferenziati nella cartella scelta:
+- `<prefix>_AappSumVis.tif`
+- `<prefix>_Hocc.tif`
+- `<prefix>_Dsky.tif`
+- `<prefix>_ASTOR.tif`
 
-### macOS
+NoData viene propagato dal DEM. I raster validi vengono aggiunti automaticamente al progetto QGIS.
 
-```bash
-git clone https://github.com/<TUO-UTENTE>/<TUO-REPO>.git ~/Library/Application\ Support/QGIS/QGIS3/profiles/default/python/plugins/IMPATTO_CUMULATO
-```
+## Output recettori opzionale
 
-## Abilitazione in QGIS
+Se viene passato un layer recettori, il sink di output contiene:
+- `n_vis`
+- `d_min`
+- `aapp_sum`
+- `hocc`
+- `dsky`
+- `astor`
 
-1. Apri QGIS
-2. Plugin → Gestisci e installa plugin
-3. Cerca `IMPATTO-CUMULATO`
-4. Abilita il plugin
-
-## Aggiornamento
-
-### Linux
-
-```bash
-git -C ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/IMPATTO_CUMULATO pull
-```
-
-### Windows
-
-```powershell
-git -C "$env:APPDATA\QGIS\QGIS3\profiles\default\python\plugins\IMPATTO_CUMULATO" pull
-```
-
-### macOS
-
-```bash
-git -C ~/Library/Application\ Support/QGIS/QGIS3/profiles/default/python/plugins/IMPATTO_CUMULATO pull
-```
-
-## Nota sul calcolo
-
-La funzione principale è `compute_cumulative_impact(...)` in `calculator.py`.
-Calcola la media pesata dei componenti normalizzati in `[0,1]` e valida i dati in input.
+Tutti i valori sono calcolati con la stessa logica LOS reale usata per i raster.
