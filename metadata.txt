@@ -1,14 +1,16 @@
 [general]
 name=IMPATTO-CUMULATO
 qgisMinimumVersion=3.22
-description=Plugin QGIS per il calcolo dell'indice di impatto cumulato.
+description=Plugin QGIS per analisi cumulata di visibilità eolica su DEM.
 version=0.1.0
 author=IMPATTO-CUMULATO Team
 email=info@example.com
-about=Include il modulo calculator.py con il codice di calcolo dell'indice cumulato.
+about=Calcola AappSumVis, Hocc, Dsky e ASTOR con analisi line-of-sight reale.
 tracker=
 repository=
 category=Analysis
 icon=
 experimental=True
 deprecated=False
+
+hasProcessingProvider=True

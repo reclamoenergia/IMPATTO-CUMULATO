@@ -1,55 +1,187 @@
-"""Core cumulative-impact math, independent from QGIS APIs."""
+"""Computation engine for cumulative wind-visibility analysis."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Iterable, Sequence
 
 
 @dataclass(frozen=True)
-class ImpactComponent:
-    """Single weighted component used in cumulative impact."""
+class Turbine:
+    """Turbine geometry projected in DEM CRS."""
 
-    name: str
-    value: float
-    weight: float = 1.0
-
-
-class InvalidImpactData(ValueError):
-    """Raised when one or more components are invalid."""
+    x: float
+    y: float
+    hub_h: float
+    rot_d: float
+    hbase: float
 
 
-def compute_cumulative_impact(components: Sequence[ImpactComponent]) -> float:
-    """Return weighted average impact in [0, 1].
+@dataclass(frozen=True)
+class DemGrid:
+    """In-memory DEM representation with georeferencing information."""
 
-    Each component value must already be normalized in [0, 1].
-    """
-    if not components:
-        raise InvalidImpactData("At least one impact component is required.")
+    data: Sequence[Sequence[float]]
+    geotransform: tuple[float, float, float, float, float, float]
+    nodata: float | None
 
-    weighted_sum = 0.0
-    weight_sum = 0.0
+    @property
+    def nrows(self) -> int:
+        return len(self.data)
 
-    for component in components:
-        if not 0.0 <= component.value <= 1.0:
-            raise InvalidImpactData(
-                f"Component '{component.name}' has value {component.value}, expected [0, 1]."
-            )
-        if component.weight < 0.0:
-            raise InvalidImpactData(
-                f"Component '{component.name}' has negative weight {component.weight}."
-            )
+    @property
+    def ncols(self) -> int:
+        return len(self.data[0]) if self.nrows else 0
 
-        weighted_sum += component.value * component.weight
-        weight_sum += component.weight
+    @property
+    def pixel_size_x(self) -> float:
+        return abs(self.geotransform[1])
 
-    if weight_sum <= 0.0:
-        raise InvalidImpactData("The total weight must be greater than zero.")
+    @property
+    def pixel_size_y(self) -> float:
+        return abs(self.geotransform[5])
 
-    return weighted_sum / weight_sum
+    @property
+    def sample_step(self) -> float:
+        return min(self.pixel_size_x, self.pixel_size_y)
+
+    def world_to_pixel(self, x: float, y: float) -> tuple[int, int]:
+        gt = self.geotransform
+        col = int(math.floor((x - gt[0]) / gt[1]))
+        row = int(math.floor((y - gt[3]) / gt[5]))
+        return row, col
+
+    def pixel_center(self, row: int, col: int) -> tuple[float, float]:
+        gt = self.geotransform
+        x = gt[0] + (col + 0.5) * gt[1]
+        y = gt[3] + (row + 0.5) * gt[5]
+        return x, y
+
+    def value_at(self, x: float, y: float) -> float | None:
+        row, col = self.world_to_pixel(x, y)
+        if row < 0 or col < 0 or row >= self.nrows or col >= self.ncols:
+            return None
+        value = float(self.data[row][col])
+        if self.nodata is not None and math.isclose(value, self.nodata):
+            return None
+        if math.isnan(value):
+            return None
+        return value
 
 
-def compute_from_pairs(pairs: Iterable[tuple[str, float, float]]) -> float:
-    """Convenience wrapper for UI/table-driven workflows."""
-    components = [ImpactComponent(name=n, value=v, weight=w) for n, v, w in pairs]
-    return compute_cumulative_impact(components)
+def build_spatial_index(turbines: Sequence[Turbine], cell_size: float) -> dict[tuple[int, int], list[int]]:
+    """Build a lightweight grid index for non-QGIS contexts."""
+    index: dict[tuple[int, int], list[int]] = {}
+    if cell_size <= 0:
+        return index
+    for idx, turbine in enumerate(turbines):
+        key = (int(math.floor(turbine.x / cell_size)), int(math.floor(turbine.y / cell_size)))
+        index.setdefault(key, []).append(idx)
+    return index
+
+
+def union_circular_intervals(intervals: Iterable[tuple[float, float]]) -> float:
+    """Union length for angular intervals on [0, 360)."""
+    normalized: list[tuple[float, float]] = []
+    for start, end in intervals:
+        s = start % 360.0
+        e = end % 360.0
+        if math.isclose((end - start) % 360.0, 0.0, abs_tol=1e-10) and not math.isclose(start, end):
+            return 360.0
+        if s <= e:
+            normalized.append((s, e))
+        else:
+            normalized.append((s, 360.0))
+            normalized.append((0.0, e))
+
+    if not normalized:
+        return 0.0
+
+    normalized.sort(key=lambda item: item[0])
+    merged: list[list[float]] = [[normalized[0][0], normalized[0][1]]]
+    for start, end in normalized[1:]:
+        if start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return float(sum(end - start for start, end in merged))
+
+
+def los_horizon_angle(dem: DemGrid, px: float, py: float, tx: float, ty: float, hp: float) -> float:
+    """Compute horizon angle (radians) along LOS from observer P to turbine T."""
+    dx = tx - px
+    dy = ty - py
+    di = math.hypot(dx, dy)
+    if di <= 0.0:
+        return -math.inf
+
+    step = max(0.5, dem.sample_step)
+    n_steps = int(di / step)
+    if n_steps <= 1:
+        return -math.inf
+
+    alpha_hor = -math.inf
+    for step_idx in range(1, n_steps):
+        frac = step_idx / n_steps
+        sx = px + dx * frac
+        sy = py + dy * frac
+        hs = dem.value_at(sx, sy)
+        if hs is None:
+            continue
+        ds = di * frac
+        if ds <= 0.0:
+            continue
+        alpha = math.atan((hs - hp) / ds)
+        if alpha > alpha_hor:
+            alpha_hor = alpha
+    return alpha_hor
+
+
+def compute_cell_metrics(px: float, py: float, hp: float, candidate_turbines: Sequence[Turbine], dem: DemGrid, radius_m: float) -> dict[str, float | int | None]:
+    """Compute cumulative metrics for a single observer location."""
+    intervals: list[tuple[float, float]] = []
+    aapp_sum_rad = 0.0
+    n_vis = 0
+    d_min = math.inf
+
+    for turbine in candidate_turbines:
+        dx = turbine.x - px
+        dy = turbine.y - py
+        di = math.hypot(dx, dy)
+        if di <= 0.0 or di > radius_m:
+            continue
+
+        theta = (math.degrees(math.atan2(dx, dy)) + 360.0) % 360.0
+        htop = turbine.hbase + turbine.hub_h + turbine.rot_d / 2.0
+        hbot = turbine.hbase + turbine.hub_h - turbine.rot_d / 2.0
+
+        alpha_hor = los_horizon_angle(dem, px, py, turbine.x, turbine.y, hp)
+        hcut = hp + math.tan(alpha_hor) * di if alpha_hor != -math.inf else -math.inf
+
+        hvis = max(0.0, htop - max(hbot, hcut))
+        if hvis <= 0.0:
+            continue
+
+        hvisbase = max(hbot, hcut)
+        aapp_vis = max(0.0, math.atan((htop - hp) / di) - math.atan((hvisbase - hp) / di))
+
+        if aapp_vis > 0.0:
+            aapp_sum_rad += aapp_vis
+            n_vis += 1
+            d_min = min(d_min, di)
+            delta_theta = math.degrees(2.0 * math.atan((turbine.rot_d / 2.0) / di))
+            intervals.append((theta - delta_theta / 2.0, theta + delta_theta / 2.0))
+
+    aapp_sum_deg = math.degrees(aapp_sum_rad)
+    hocc = union_circular_intervals(intervals)
+    dsky = aapp_sum_deg / hocc if hocc > 0.0 else 0.0
+
+    return {
+        "aapp_sum": float(aapp_sum_deg),
+        "hocc": float(hocc),
+        "dsky": float(dsky),
+        "astor": int(n_vis),
+        "n_vis": int(n_vis),
+        "d_min": None if n_vis == 0 else float(d_min),
+    }
