@@ -1,4 +1,4 @@
-"""QGIS processing algorithm for cumulative wind-visibility analysis."""
+"""QGIS processing algorithm for Visual Angular Impact (VAI)."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from qgis.core import (
     Qgis,
 )
 
-from .calculator import DemGrid, Turbine, compute_point_metrics
+from .calculator import DemGrid, Turbine, compute_point_vai
 
 
 class CumulativeVisibilityAlgorithm(QgsProcessingAlgorithm):
@@ -62,7 +62,7 @@ class CumulativeVisibilityAlgorithm(QgsProcessingAlgorithm):
         return "cumulative_visibility"
 
     def displayName(self):
-        return self.tr("Cumulative Wind Visibility")
+        return self.tr("Cumulative Wind Visibility (VAI)")
 
     def group(self):
         return self.tr("IMPATTO-CUMULATO")
@@ -72,7 +72,7 @@ class CumulativeVisibilityAlgorithm(QgsProcessingAlgorithm):
 
     def shortHelpString(self):
         return self.tr(
-            "Compute Aapp_sum, Hocc and VAI rasters from turbines and DEM using line-of-sight local horizon logic."
+            "Compute VAI raster and optional receptor values from turbines and DEM using local-horizon LOS logic."
         )
 
     def initAlgorithm(self, config=None):
@@ -87,7 +87,7 @@ class CumulativeVisibilityAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(QgsProcessingParameterFolderDestination(self.OUTPUT_DIR, self.tr("Output folder")))
         self.addParameter(QgsProcessingParameterString(self.PREFIX, self.tr("Output file prefix"), defaultValue="impact"))
         self.addParameter(QgsProcessingParameterFeatureSource(self.INPUT_RECEPTORS, self.tr("Optional receptor points"), [QgsProcessing.TypeVectorPoint], optional=True))
-        self.addParameter(QgsProcessingParameterFeatureSink(self.OUTPUT_RECEPTORS, self.tr("Receptor metrics output"), QgsProcessing.TypeVectorPoint, optional=True))
+        self.addParameter(QgsProcessingParameterFeatureSink(self.OUTPUT_RECEPTORS, self.tr("Receptor VAI output"), QgsProcessing.TypeVectorPoint, optional=True))
 
     def processAlgorithm(self, parameters, context, feedback):
         turbine_source = self.parameterAsSource(parameters, self.INPUT_TURBINES, context)
@@ -180,11 +180,7 @@ class CumulativeVisibilityAlgorithm(QgsProcessingAlgorithm):
         out_gt = (xmin, px_size, 0.0, ymax, 0.0, -py_size)
 
         fill_value = nodata if nodata is not None else np.nan
-        outputs = {
-            "AappSum": np.full((rows, cols), fill_value, dtype=np.float32),
-            "Hocc": np.full((rows, cols), fill_value, dtype=np.float32),
-            "VAI": np.full((rows, cols), fill_value, dtype=np.float32),
-        }
+        vai_output = np.full((rows, cols), fill_value, dtype=np.float32)
 
         for row in range(rows):
             if feedback.isCanceled():
@@ -198,38 +194,24 @@ class CumulativeVisibilityAlgorithm(QgsProcessingAlgorithm):
                 search = QgsRectangle(px - radius_m, py - radius_m, px + radius_m, py + radius_m)
                 candidate_ids = index.intersects(search)
                 if not candidate_ids:
-                    outputs["AappSum"][row, col] = 0.0
-                    outputs["Hocc"][row, col] = 0.0
-                    outputs["VAI"][row, col] = 0.0
+                    vai_output[row, col] = 0.0
                     continue
                 candidates = [turbines[idx] for idx in candidate_ids]
-                metrics = compute_point_metrics(px, py, hp, candidates, dem, radius_m)
-                outputs["AappSum"][row, col] = metrics["aapp_sum"]
-                outputs["Hocc"][row, col] = metrics["hocc"]
-                outputs["VAI"][row, col] = metrics["vai"]
+                vai_output[row, col] = compute_point_vai(px, py, hp, candidates, dem, radius_m)
 
             feedback.setProgress(int((row + 1) * 100 / rows))
 
         os.makedirs(output_dir, exist_ok=True)
-        output_paths = {}
-        for key, arr in outputs.items():
-            path = os.path.join(output_dir, f"{prefix}_{key}.tif")
-            self._write_geotiff(path, arr, out_gt, projection, nodata)
-            output_paths[key] = path
-            rlayer = QgsRasterLayer(path, os.path.basename(path))
-            if rlayer.isValid():
-                QgsProject.instance().addMapLayer(rlayer)
+        output_path = os.path.join(output_dir, f"{prefix}_VAI.tif")
+        self._write_geotiff(output_path, vai_output, out_gt, projection, nodata)
+        rlayer = QgsRasterLayer(output_path, os.path.basename(output_path))
+        if rlayer.isValid():
+            QgsProject.instance().addMapLayer(rlayer)
 
-        results = {
-            "AappSum": output_paths["AappSum"],
-            "Hocc": output_paths["Hocc"],
-            "VAI": output_paths["VAI"],
-        }
+        results = {"VAI": output_path}
 
         if receptor_source is not None:
             receptor_fields = QgsFields(receptor_source.fields())
-            receptor_fields.append(QgsField("aapp_sum", QVariant.Double))
-            receptor_fields.append(QgsField("hocc", QVariant.Double))
             receptor_fields.append(QgsField("vai", QVariant.Double))
 
             sink, sink_id = self.parameterAsSink(
@@ -261,17 +243,16 @@ class CumulativeVisibilityAlgorithm(QgsProcessingAlgorithm):
 
                     search = QgsRectangle(dem_pt.x() - radius_m, dem_pt.y() - radius_m, dem_pt.x() + radius_m, dem_pt.y() + radius_m)
                     candidates = [turbines[idx] for idx in index.intersects(search)]
-                    metrics = compute_point_metrics(dem_pt.x(), dem_pt.y(), hp, candidates, dem, radius_m)
+                    vai = compute_point_vai(dem_pt.x(), dem_pt.y(), hp, candidates, dem, radius_m)
 
                     out_feature = QgsFeature(receptor_fields)
                     out_feature.setGeometry(geom)
-                    attrs = list(feature.attributes()) + [metrics["aapp_sum"], metrics["hocc"], metrics["vai"]]
-                    out_feature.setAttributes(attrs)
+                    out_feature.setAttributes(list(feature.attributes()) + [vai])
                     sink.addFeature(out_feature, QgsFeatureSink.FastInsert)
 
                 results[self.OUTPUT_RECEPTORS] = sink_id
 
-        QgsMessageLog.logMessage("Cumulative visibility completed.", "IMPATTO-CUMULATO", Qgis.Info)
+        QgsMessageLog.logMessage("VAI visibility completed.", "IMPATTO-CUMULATO", Qgis.Info)
         return results
 
     @staticmethod

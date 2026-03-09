@@ -1,10 +1,10 @@
-"""Computation engine for cumulative wind-visibility analysis."""
+"""Computation engine for Visual Angular Impact (VAI)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Iterable, Sequence
+from typing import Sequence
 
 
 @dataclass(frozen=True)
@@ -71,7 +71,7 @@ class DemGrid:
 
 
 def build_spatial_index(turbines: Sequence[Turbine], cell_size: float) -> dict[tuple[int, int], list[int]]:
-    """Build a lightweight grid index for non-QGIS contexts."""
+    """Build a lightweight grid index for non-QGIS contexts/tests."""
     index: dict[tuple[int, int], list[int]] = {}
     if cell_size <= 0:
         return index
@@ -81,38 +81,13 @@ def build_spatial_index(turbines: Sequence[Turbine], cell_size: float) -> dict[t
     return index
 
 
-def union_circular_intervals(intervals: Iterable[tuple[float, float]]) -> float:
-    """Union length for angular intervals on [0, 360)."""
-    normalized: list[tuple[float, float]] = []
-    for start, end in intervals:
-        width = (end - start) % 360.0
-        if math.isclose(width, 0.0, abs_tol=1e-10) and not math.isclose(start, end):
-            return 360.0
-        s = start % 360.0
-        e = (s + width) % 360.0
-        if width <= 0.0:
-            continue
-        if s <= e:
-            normalized.append((s, e))
-        else:
-            normalized.append((s, 360.0))
-            normalized.append((0.0, e))
-
-    if not normalized:
-        return 0.0
-
-    normalized.sort(key=lambda item: item[0])
-    merged: list[list[float]] = [[normalized[0][0], normalized[0][1]]]
-    for start, end in normalized[1:]:
-        if start <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], end)
-        else:
-            merged.append([start, end])
-    return float(sum(end - start for start, end in merged))
+def sample_dem_value(dem: DemGrid, x: float, y: float) -> float | None:
+    """Sample DEM value with NoData/out-of-bounds handling."""
+    return dem.value_at(x, y)
 
 
 def los_horizon_angle(dem: DemGrid, px: float, py: float, tx: float, ty: float, hp: float) -> float:
-    """Compute horizon angle (radians) along LOS from observer P to turbine T."""
+    """Compute local horizon angle (radians) along LOS from observer P to turbine T."""
     dx = tx - px
     dy = ty - py
     di = math.hypot(dx, dy)
@@ -129,7 +104,7 @@ def los_horizon_angle(dem: DemGrid, px: float, py: float, tx: float, ty: float, 
         frac = step_idx / n_steps
         sx = px + dx * frac
         sy = py + dy * frac
-        hs = dem.value_at(sx, sy)
+        hs = sample_dem_value(dem, sx, sy)
         if hs is None:
             continue
         ds = di * frac
@@ -141,17 +116,15 @@ def los_horizon_angle(dem: DemGrid, px: float, py: float, tx: float, ty: float, 
     return alpha_hor
 
 
-def compute_point_metrics(
+def compute_point_vai(
     px: float,
     py: float,
     hp: float,
     candidate_turbines: Sequence[Turbine],
     dem: DemGrid,
     radius_m: float,
-) -> dict[str, float]:
-    """Compute Aapp_sum, Hocc and VAI for one observer location."""
-    intervals: list[tuple[float, float]] = []
-    aapp_sum_deg = 0.0
+) -> float:
+    """Compute VAI at one observer location as Σ(Aapp_vis_i * delta_theta_i), degree²."""
     vai = 0.0
 
     for turbine in candidate_turbines:
@@ -161,7 +134,6 @@ def compute_point_metrics(
         if di <= 0.0 or di > radius_m:
             continue
 
-        theta = (math.degrees(math.atan2(dx, dy)) + 360.0) % 360.0
         htop = turbine.hbase + turbine.hub_h + turbine.rot_d / 2.0
         hbot = turbine.hbase + turbine.hub_h - turbine.rot_d / 2.0
 
@@ -179,18 +151,6 @@ def compute_point_metrics(
 
         aapp_vis_deg = math.degrees(aapp_vis_rad)
         delta_theta_deg = math.degrees(2.0 * math.atan((turbine.rot_d / 2.0) / di))
-
-        aapp_sum_deg += aapp_vis_deg
         vai += aapp_vis_deg * delta_theta_deg
-        intervals.append((theta - delta_theta_deg / 2.0, theta + delta_theta_deg / 2.0))
 
-    return {
-        "aapp_sum": float(aapp_sum_deg),
-        "hocc": float(union_circular_intervals(intervals)),
-        "vai": float(vai),
-    }
-
-
-def compute_cell_metrics(*args, **kwargs) -> dict[str, float]:
-    """Backward-compatible alias."""
-    return compute_point_metrics(*args, **kwargs)
+    return float(vai)
