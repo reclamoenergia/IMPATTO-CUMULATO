@@ -18,7 +18,7 @@ class ImpattoCumulatoPlugin:
         self.provider = ImpattoCumulatoProvider()
         QgsApplication.processingRegistry().addProvider(self.provider)
 
-        self.action = QAction("IMPATTO-CUMULATO: cumulative visibility", self.iface.mainWindow())
+        self.action = QAction("IMPATTO-CUMULATO: VAI visibility", self.iface.mainWindow())
         self.action.triggered.connect(self.run_analysis)
         self.iface.addPluginToMenu("IMPATTO-CUMULATO", self.action)
 

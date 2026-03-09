@@ -1,11 +1,11 @@
 [general]
 name=IMPATTO-CUMULATO
 qgisMinimumVersion=3.22
-description=Plugin QGIS per analisi cumulata di visibilità eolica su DEM.
+description=Plugin QGIS per calcolo VAI (Visual Angular Impact) su DEM.
 version=0.1.0
 author=IMPATTO-CUMULATO Team
 email=info@example.com
-about=Calcola Aapp_sum, Hocc e VAI con analisi line-of-sight reale.
+about=Calcola VAI con analisi line-of-sight reale e orizzonte locale da DEM.
 tracker=
 repository=
 category=Analysis
